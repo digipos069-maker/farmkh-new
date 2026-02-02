@@ -61,7 +61,8 @@ class MainWindow(QMainWindow):
         # Pages
         self.content_stack.addWidget(self.create_page("Dashboard Content"))
         self.content_stack.addWidget(self.create_page("Account Management"))
-        self.content_stack.addWidget(RegAccountPage())
+        self.reg_account_page = RegAccountPage()
+        self.content_stack.addWidget(self.reg_account_page)
         self.content_stack.addWidget(self.create_page("Automation Tasks"))
         self.content_stack.addWidget(self.create_page("Settings"))
         
@@ -69,6 +70,10 @@ class MainWindow(QMainWindow):
         
         # Add Right Panel to Main Split
         main_split_layout.addWidget(right_panel)
+        
+        # Connect device selection to Reg Account page
+        self.device_manager.device_selected.connect(self.reg_account_page.set_selected_device)
+        self.device_manager.config_changed.connect(self.reg_account_page.set_device_config)
         
         # Set default page
         self.switch_page(0)

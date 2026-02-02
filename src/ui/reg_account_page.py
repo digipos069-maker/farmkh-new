@@ -4,6 +4,9 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QStackedWidget, QScrollArea, QRadioButton, 
                              QButtonGroup, QGroupBox, QDialog)
 from PyQt5.QtCore import Qt, pyqtSignal, QObject
+from src.core.adb_manager import ADBManager
+import os
+import threading
 from src.core.registration import RegistrationBot
 from .dialogs.proxy_dialog import ProxyDialog
 from .dialogs.name_dialog import NameDialog
@@ -11,6 +14,7 @@ from .widgets.selection_input import SelectionInput
 
 class Signaler(QObject):
     log_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal()
 
 class ClickableLabel(QLabel):
     clicked = pyqtSignal()
@@ -19,15 +23,21 @@ class ClickableLabel(QLabel):
         super().mousePressEvent(event)
 
 class RegAccountPage(QWidget):
+    FACEBOOK_PACKAGE = "com.facebook.katana"
     def __init__(self):
         super().__init__()
         self.bot = None
         self.signaler = Signaler()
         self.signaler.log_signal.connect(self.append_log)
+        self.signaler.finished_signal.connect(self.on_registration_finished)
         self.proxy_data = "" 
         self.proxy_list = [] 
         self.custom_first_names = []
         self.custom_last_names = []
+        self.selected_device_ids = []
+        self.device_config = {}
+        self.multi_run_active = False
+        self._multi_stop_event = None
         self.init_ui()
 
     def init_ui(self):
@@ -351,6 +361,20 @@ class RegAccountPage(QWidget):
         
         # Enforce cursors on all interactive elements
         self.set_cursors(self)
+        self.update_start_state()
+
+    def set_selected_device(self, device_ids):
+        if not device_ids:
+            self.selected_device_ids = []
+        elif isinstance(device_ids, (list, tuple)):
+            self.selected_device_ids = list(device_ids)
+        else:
+            self.selected_device_ids = [device_ids]
+        self.update_start_state()
+
+    def set_device_config(self, config):
+        self.device_config = config or {}
+        self.update_start_state()
 
     def set_cursors(self, widget):
         for child in widget.findChildren(QWidget):
@@ -403,6 +427,22 @@ class RegAccountPage(QWidget):
 
     def start_process(self):
         self.append_log("--- Starting Automation ---")
+        if not self.selected_device_ids:
+            self.append_log("Error: No device selected. Please select a device first.")
+            self.update_start_state()
+            return
+
+        ok, msg = self.validate_device_config()
+        if not ok:
+            self.append_log(f"Error: {msg}")
+            self.update_start_state()
+            return
+
+        ok, msg = self.validate_reg_config()
+        if not ok:
+            self.append_log(f"Error: {msg}")
+            self.update_start_state()
+            return
         
         # Check Proxy Logic
         net_id = self.network_group.checkedId()
@@ -415,15 +455,160 @@ class RegAccountPage(QWidget):
                 self.append_log("Click the 'Proxy' text to add proxies.")
                 return
             proxy_arg = f"{len(self.proxy_list)} Proxies Loaded"
-            
-        self.bot = RegistrationBot(self.signaler.log_signal.emit)
-        self.bot.start_registration(1, proxy_arg, "N/A")
-        self.start_btn.setEnabled(False); self.stop_btn.setEnabled(True)
+
+        delay_type = self.device_config.get("delay_type")
+        delay_seconds = int(self.device_config.get("delay_seconds") or 0)
+        device_delay = delay_seconds if delay_type == "device" else 0
+        click_delay = delay_seconds if delay_type == "click" else 0
+
+        devices = list(self.selected_device_ids)
+        if len(devices) > 1:
+            self.start_multi_device_flow(devices, proxy_arg, device_delay, click_delay)
+            return
+
+        ok, msg = self.apply_device_config_for_device(devices[0])
+        if not ok:
+            self.append_log(f"Error: {msg}")
+            self.update_start_state()
+            return
+
+        self.bot = RegistrationBot(self.signaler.log_signal.emit, self.signaler.finished_signal.emit)
+        self.bot.start_registration(1, proxy_arg, "N/A", device_delay=device_delay, click_delay=click_delay)
+        self.update_start_state()
 
     def stop_process(self):
-        if self.bot: self.bot.stop_registration()
-        self.start_btn.setEnabled(True); self.stop_btn.setEnabled(False)
+        if self._multi_stop_event:
+            self._multi_stop_event.set()
+        if self.bot:
+            self.bot.stop_registration()
+        self.update_start_state()
 
     def append_log(self, text):
         self.log_area.append(text)
         self.log_area.verticalScrollBar().setValue(self.log_area.verticalScrollBar().maximum())
+
+    def on_registration_finished(self):
+        if self.multi_run_active:
+            return
+        self.update_start_state()
+
+    def update_start_state(self):
+        can_start = bool(self.selected_device_ids) and not (self.bot and self.bot.is_running) and not self.multi_run_active
+        self.start_btn.setEnabled(can_start)
+        self.stop_btn.setEnabled(bool(self.bot and self.bot.is_running) or self.multi_run_active)
+
+    def validate_device_config(self):
+        cfg = self.device_config or {}
+        mgmt_mode = cfg.get("mgmt_mode")
+        apk_rel = cfg.get("apk_rel_path") or ""
+        apk_folder = cfg.get("apk_folder") or ""
+        package_name = self.FACEBOOK_PACKAGE
+
+        if mgmt_mode == "reinstall":
+            if not apk_rel:
+                return False, "APK is required for Re-install."
+            apk_path = os.path.join(apk_folder, apk_rel)
+            if not os.path.isfile(apk_path):
+                return False, "Selected APK not found on disk."
+
+        return True, ""
+
+    def validate_reg_config(self):
+        # Name
+        if self.name_group.checkedId() == 1:
+            if not self.custom_first_names or not self.custom_last_names:
+                return False, "Custom name selected but name lists are empty."
+
+        # Contact
+        if self.contact_group.checkedId() == 1:
+            email = self.email_input.text().strip()
+            if not email or "@" not in email or "." not in email:
+                return False, "Valid email is required for Email contact mode."
+
+        # Password
+        if self.password_group.checkedId() == 1:
+            if not self.pwd_custom_input.text().strip():
+                return False, "Custom password is required."
+
+        # Proxy
+        if self.network_group.checkedId() == 1 and not self.proxy_list:
+            return False, "Proxy mode selected but no proxies configured."
+
+        return True, ""
+
+    def apply_device_config_for_device(self, device_id):
+        cfg = self.device_config or {}
+        mgmt_mode = cfg.get("mgmt_mode")
+        apk_rel = cfg.get("apk_rel_path") or ""
+        apk_folder = cfg.get("apk_folder") or ""
+        package_name = self.FACEBOOK_PACKAGE
+
+        if mgmt_mode == "clear_cache":
+            self.signaler.log_signal.emit(f"Clearing app data on {device_id} ({package_name})...")
+            ok, msg = ADBManager.clear_app_data(device_id, package_name)
+            if not ok:
+                return False, f"Clear cache failed: {msg.strip()}"
+            return True, "Clear cache OK"
+
+        if mgmt_mode == "reinstall":
+            apk_path = os.path.join(apk_folder, apk_rel)
+            if package_name:
+                self.signaler.log_signal.emit(f"Uninstalling {package_name} on {device_id}...")
+                ADBManager.uninstall_app(device_id, package_name)
+            self.signaler.log_signal.emit(f"Installing APK on {device_id}: {apk_rel}")
+            ok, msg = ADBManager.install_apk(device_id, apk_path)
+            if not ok:
+                return False, f"Install failed: {msg.strip()}"
+            self.signaler.log_signal.emit(f"Opening {package_name} on {device_id}...")
+            ok, msg = ADBManager.launch_app(device_id, package_name)
+            if not ok:
+                return False, f"Open app failed: {msg.strip()}"
+            return True, "Re-install OK"
+
+        return True, ""
+
+    def start_multi_device_flow(self, devices, proxy_arg, device_delay, click_delay):
+        if self.multi_run_active:
+            return
+        self.multi_run_active = True
+        self._multi_stop_event = threading.Event()
+        self.update_start_state()
+
+        thread = threading.Thread(
+            target=self._run_multi_device_flow,
+            args=(devices, proxy_arg, device_delay, click_delay),
+            daemon=True
+        )
+        thread.start()
+
+    def _run_multi_device_flow(self, devices, proxy_arg, device_delay, click_delay):
+        for idx, device_id in enumerate(devices, start=1):
+            if self._multi_stop_event.is_set():
+                break
+
+            self.signaler.log_signal.emit(f"--- Device {idx}/{len(devices)}: {device_id} ---")
+
+            ok, msg = self.apply_device_config_for_device(device_id)
+            if not ok:
+                self.signaler.log_signal.emit(f"Error: {msg}")
+                break
+
+            done_event = threading.Event()
+            self.bot = RegistrationBot(self.signaler.log_signal.emit, done_event.set)
+            self.bot.start_registration(1, proxy_arg, "N/A", device_delay=0, click_delay=click_delay)
+
+            while not done_event.is_set():
+                if self._multi_stop_event.is_set():
+                    self.bot.stop_registration()
+                done_event.wait(0.2)
+
+            if idx < len(devices) and device_delay > 0 and not self._multi_stop_event.is_set():
+                self.signaler.log_signal.emit(f"Waiting {device_delay}s before next device...")
+                waited = 0
+                while waited < device_delay and not self._multi_stop_event.is_set():
+                    threading.Event().wait(0.2)
+                    waited += 0.2
+
+        self.multi_run_active = False
+        self._multi_stop_event = None
+        self.signaler.finished_signal.emit()
