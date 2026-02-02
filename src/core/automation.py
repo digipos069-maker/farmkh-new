@@ -1,7 +1,7 @@
 
 import time
 
-class TikTokBot:
+class FacebookBot:
     def __init__(self, account_data):
         self.account_data = account_data
         self.is_running = False

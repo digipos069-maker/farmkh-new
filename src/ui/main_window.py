@@ -10,7 +10,7 @@ from .device_manager import DeviceManager
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("TikTok Automation Manager")
+        self.setWindowTitle("Facebook Automation Manager")
         self.resize(1200, 800) # Increased size for split view
         self.setStyleSheet(get_stylesheet())
         
@@ -39,7 +39,7 @@ class MainWindow(QMainWindow):
         top_bar_layout.setSpacing(5)
         
         # App Title
-        title = QLabel("TikTok Manager")
+        title = QLabel("Facebook Manager")
         title.setStyleSheet("font-size: 18px; font-weight: bold; padding: 0 20px; color: #032EA1;")
         top_bar_layout.addWidget(title)
         
@@ -100,7 +100,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(label)
         
         if "Dashboard" in text:
-            msg = QLabel("Welcome to TikTok Automation Manager.\nSelect a module from the sidebar to begin.")
+            msg = QLabel("Welcome to Facebook Automation Manager.\nSelect a module from the sidebar to begin.")
             msg.setAlignment(Qt.AlignCenter)
             layout.addWidget(msg)
             btn = QPushButton("Start New Task")
