@@ -1,0 +1,237 @@
+from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QLabel, QTableWidget, 
+                             QTableWidgetItem, QPushButton, QHBoxLayout, 
+                             QHeaderView, QFrame, QRadioButton, QComboBox, QButtonGroup, QSpinBox)
+from PyQt5.QtCore import Qt
+from src.core.adb_manager import ADBManager
+import os
+
+class DeviceManager(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setFixedWidth(320) # Slightly wider for table
+        self.apk_folder = "config/apk"
+        self.init_ui()
+        self.refresh_devices() # Initial load
+
+    def toggle_delay_inputs(self, button):
+        id = self.delay_group.id(button)
+        # 0 = Delay Device, 1 = Delay Click
+        self.dd_input.setEnabled(id == 0)
+        self.dc_input.setEnabled(id == 1)
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+        
+        # Title
+        title = QLabel("Device Manager")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #333;")
+        layout.addWidget(title)
+        
+        # --- App Management Options ---
+        app_mgmt_layout = QHBoxLayout()
+        app_mgmt_layout.setSpacing(10)
+        
+        self.mgmt_group = QButtonGroup(self)
+        
+        # Option 1: Clear Cache
+        rb_clear = QRadioButton("Clear Cache")
+        rb_clear.setCursor(Qt.PointingHandCursor)
+        rb_clear.setChecked(True)
+        self.mgmt_group.addButton(rb_clear, 0)
+        app_mgmt_layout.addWidget(rb_clear)
+        
+        # Option 2: Re-install
+        # We need a small container for radio + combo to keep them together in the HBox
+        reinstall_container = QWidget()
+        reinstall_layout = QHBoxLayout(reinstall_container)
+        reinstall_layout.setContentsMargins(0, 0, 0, 0)
+        reinstall_layout.setSpacing(5)
+        
+        rb_reinstall = QRadioButton("Re-install")
+        rb_reinstall.setCursor(Qt.PointingHandCursor)
+        self.mgmt_group.addButton(rb_reinstall, 1)
+        
+        self.apk_combo = QComboBox()
+        self.apk_combo.setCursor(Qt.PointingHandCursor)
+        self.apk_combo.setPlaceholderText("Select APK")
+        self.apk_combo.setFixedWidth(100) # Limit width to fit
+        self.apk_combo.setEnabled(False) 
+        
+        reinstall_layout.addWidget(rb_reinstall)
+        reinstall_layout.addWidget(self.apk_combo)
+        
+        app_mgmt_layout.addWidget(reinstall_container)
+        app_mgmt_layout.addStretch()
+        
+        self.mgmt_group.buttonClicked.connect(self.toggle_mgmt_mode)
+        
+        # Wrap in VBox to add Separator below
+        top_container = QVBoxLayout()
+        top_container.addLayout(app_mgmt_layout)
+        
+        # Separator
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        top_container.addWidget(line)
+        
+        # --- Delay Options ---
+        delay_layout = QHBoxLayout()
+        delay_layout.setSpacing(5)
+        
+        self.delay_group = QButtonGroup(self)
+        self.delay_group.setExclusive(False) # Allow unchecking if needed, or maybe treat as checkboxes? 
+        # User said "radio box", usually implies exclusive. Let's make them exclusive for configuration focus.
+        self.delay_group.setExclusive(True)
+
+        # Delay Device
+        rb_dd = QRadioButton("Delay Device")
+        rb_dd.setCursor(Qt.PointingHandCursor)
+        self.delay_group.addButton(rb_dd, 0)
+        
+        self.dd_input = QSpinBox()
+        self.dd_input.setRange(0, 60)
+        self.dd_input.setSuffix("s")
+        self.dd_input.setFixedWidth(50)
+        self.dd_input.setEnabled(False)
+        
+        # Delay Click
+        rb_dc = QRadioButton("Delay Click")
+        rb_dc.setCursor(Qt.PointingHandCursor)
+        self.delay_group.addButton(rb_dc, 1)
+        
+        self.dc_input = QSpinBox()
+        self.dc_input.setRange(0, 60)
+        self.dc_input.setSuffix("s")
+        self.dc_input.setFixedWidth(50)
+        self.dc_input.setEnabled(False)
+        
+        delay_layout.addWidget(rb_dd)
+        delay_layout.addWidget(self.dd_input)
+        delay_layout.addSpacing(10)
+        delay_layout.addWidget(rb_dc)
+        delay_layout.addWidget(self.dc_input)
+        delay_layout.addStretch()
+        
+        self.delay_group.buttonClicked.connect(self.toggle_delay_inputs)
+        top_container.addLayout(delay_layout)
+        
+        layout.addLayout(top_container)
+        self.refresh_apks() # Load APKs
+        
+        # Device Table
+        self.table = QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["ID", "Name", "Status"])
+        
+        # Table Styling
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.verticalHeader().setVisible(False) # Hide row numbers
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        
+        self.table.setStyleSheet("""
+            QTableWidget {
+                border: 1px solid #cccccc;
+                border-radius: 5px;
+                background-color: white;
+                gridline-color: #f0f0f0;
+            }
+            QHeaderView::section {
+                background-color: #f8f9fa;
+                padding: 4px;
+                border: none;
+                border-bottom: 1px solid #ddd;
+                font-weight: bold;
+                color: #555;
+            }
+            QTableWidget::item {
+                padding: 5px;
+            }
+        """)
+        
+        layout.addWidget(self.table)
+        
+        # Action Buttons
+        btn_layout = QHBoxLayout()
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.setCursor(Qt.PointingHandCursor)
+        refresh_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f0f0f0;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                padding: 6px;
+                font-weight: 500;
+            }
+            QPushButton:hover { background-color: #e0e0e0; }
+        """)
+        refresh_btn.clicked.connect(self.refresh_devices)
+        
+        connect_btn = QPushButton("Connect")
+        connect_btn.setCursor(Qt.PointingHandCursor)
+        connect_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #032EA1;
+                color: white;
+                border-radius: 4px;
+                padding: 6px;
+                font-weight: 500;
+            }
+            QPushButton:hover { background-color: #02268a; }
+        """)
+        
+        btn_layout.addWidget(refresh_btn)
+        btn_layout.addWidget(connect_btn)
+        layout.addLayout(btn_layout)
+        
+        # Styles for the panel
+        self.setStyleSheet("border-right: 1px solid #e0e0e0; background-color: #f9f9f9;")
+
+    def toggle_mgmt_mode(self, button):
+        # Index 1 is Re-install
+        is_reinstall = (self.mgmt_group.id(button) == 1)
+        self.apk_combo.setEnabled(is_reinstall)
+        if is_reinstall:
+            self.refresh_apks()
+
+    def refresh_apks(self):
+        self.apk_combo.clear()
+        if os.path.exists(self.apk_folder):
+            apks = [f for f in os.listdir(self.apk_folder) if f.endswith(".apk")]
+            if apks:
+                self.apk_combo.addItems(apks)
+            else:
+                self.apk_combo.addItem("No APKs found")
+        else:
+            self.apk_combo.addItem("Config folder missing")
+
+    def refresh_devices(self):
+        self.table.setRowCount(0) # Clear existing rows
+        devices = ADBManager.get_connected_devices()
+        
+        if not devices:
+            return
+
+        for dev in devices:
+            self.add_device(dev['id'], dev['name'], dev['status'])
+
+    def add_device(self, id_val, name, status):
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        
+        # Create items
+        id_item = QTableWidgetItem(id_val)
+        name_item = QTableWidgetItem(name)
+        status_item = QTableWidgetItem(status)
+        
+        # Center text
+        id_item.setTextAlignment(Qt.AlignCenter)
+        status_item.setTextAlignment(Qt.AlignCenter)
+        
+        # Set items
+        self.table.setItem(row, 0, id_item)
+        self.table.setItem(row, 1, name_item)
+        self.table.setItem(row, 2, status_item)
