@@ -74,6 +74,7 @@ class MainWindow(QMainWindow):
         # Connect device selection to Reg Account page
         self.device_manager.device_selected.connect(self.reg_account_page.set_selected_device)
         self.device_manager.config_changed.connect(self.reg_account_page.set_device_config)
+        self.reg_account_page.device_status_signal.connect(self.device_manager.set_device_status)
         
         # Set default page
         self.switch_page(0)

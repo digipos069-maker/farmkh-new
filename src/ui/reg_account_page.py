@@ -7,6 +7,7 @@ from PyQt5.QtCore import Qt, pyqtSignal, QObject
 from src.core.adb_manager import ADBManager
 import os
 import threading
+import time
 from src.core.registration import RegistrationBot
 from .dialogs.proxy_dialog import ProxyDialog
 from .dialogs.name_dialog import NameDialog
@@ -23,7 +24,9 @@ class ClickableLabel(QLabel):
         super().mousePressEvent(event)
 
 class RegAccountPage(QWidget):
+    device_status_signal = pyqtSignal(str, str)
     FACEBOOK_PACKAGE = "com.facebook.katana"
+    GET_STARTED_TEXTS = ["Get Started", "Get start", "Get Start", "GET STARTED"]
     def __init__(self):
         super().__init__()
         self.bot = None
@@ -35,6 +38,7 @@ class RegAccountPage(QWidget):
         self.custom_first_names = []
         self.custom_last_names = []
         self.selected_device_ids = []
+        self.current_device_id = None
         self.device_config = {}
         self.multi_run_active = False
         self._multi_stop_event = None
@@ -466,15 +470,7 @@ class RegAccountPage(QWidget):
             self.start_multi_device_flow(devices, proxy_arg, device_delay, click_delay)
             return
 
-        ok, msg = self.apply_device_config_for_device(devices[0])
-        if not ok:
-            self.append_log(f"Error: {msg}")
-            self.update_start_state()
-            return
-
-        self.bot = RegistrationBot(self.signaler.log_signal.emit, self.signaler.finished_signal.emit)
-        self.bot.start_registration(1, proxy_arg, "N/A", device_delay=device_delay, click_delay=click_delay)
-        self.update_start_state()
+        self.start_single_device_flow(devices[0], proxy_arg, device_delay, click_delay)
 
     def stop_process(self):
         if self._multi_stop_event:
@@ -490,6 +486,8 @@ class RegAccountPage(QWidget):
     def on_registration_finished(self):
         if self.multi_run_active:
             return
+        if self.current_device_id:
+            self.device_status_signal.emit(self.current_device_id, "Idle")
         self.update_start_state()
 
     def update_start_state(self):
@@ -544,7 +542,7 @@ class RegAccountPage(QWidget):
         package_name = self.FACEBOOK_PACKAGE
 
         if mgmt_mode == "clear_cache":
-            self.signaler.log_signal.emit(f"Clearing app data on {device_id} ({package_name})...")
+            self.log_step(f"Clearing app data on {device_id} ({package_name})...")
             ok, msg = ADBManager.clear_app_data(device_id, package_name)
             if not ok:
                 return False, f"Clear cache failed: {msg.strip()}"
@@ -553,19 +551,32 @@ class RegAccountPage(QWidget):
         if mgmt_mode == "reinstall":
             apk_path = os.path.join(apk_folder, apk_rel)
             if package_name:
-                self.signaler.log_signal.emit(f"Uninstalling {package_name} on {device_id}...")
+                self.log_step(f"Uninstalling {package_name} on {device_id}...")
                 ADBManager.uninstall_app(device_id, package_name)
-            self.signaler.log_signal.emit(f"Installing APK on {device_id}: {apk_rel}")
+            self.log_step(f"Installing APK on {device_id}: {apk_rel}")
             ok, msg = ADBManager.install_apk(device_id, apk_path)
             if not ok:
                 return False, f"Install failed: {msg.strip()}"
-            self.signaler.log_signal.emit(f"Opening {package_name} on {device_id}...")
+            self.log_step(f"Opening {package_name} on {device_id}...")
             ok, msg = ADBManager.launch_app(device_id, package_name)
             if not ok:
                 return False, f"Open app failed: {msg.strip()}"
+            time.sleep(2)
+            ok, msg = self.click_if_button_exists(device_id, self.GET_STARTED_TEXTS)
+            if not ok:
+                self.log_step(f"Get Start button not found: {msg}")
             return True, "Re-install OK"
 
         return True, ""
+
+    def click_if_button_exists(self, device_id, texts):
+        ok, xml_text = ADBManager.dump_ui_xml(device_id)
+        if not ok:
+            return False, xml_text
+        bounds = ADBManager.find_text_bounds(xml_text, texts)
+        if not bounds:
+            return False, "Button not found"
+        return ADBManager.click_bounds(device_id, bounds)
 
     def start_multi_device_flow(self, devices, proxy_arg, device_delay, click_delay):
         if self.multi_run_active:
@@ -586,15 +597,16 @@ class RegAccountPage(QWidget):
             if self._multi_stop_event.is_set():
                 break
 
-            self.signaler.log_signal.emit(f"--- Device {idx}/{len(devices)}: {device_id} ---")
+            self.current_device_id = device_id
+            self.log_step(f"--- Device {idx}/{len(devices)}: {device_id} ---")
 
             ok, msg = self.apply_device_config_for_device(device_id)
             if not ok:
-                self.signaler.log_signal.emit(f"Error: {msg}")
+                self.log_step(f"Error: {msg}")
                 break
 
             done_event = threading.Event()
-            self.bot = RegistrationBot(self.signaler.log_signal.emit, done_event.set)
+            self.bot = RegistrationBot(self.log_step, done_event.set)
             self.bot.start_registration(1, proxy_arg, "N/A", device_delay=0, click_delay=click_delay)
 
             while not done_event.is_set():
@@ -602,8 +614,10 @@ class RegAccountPage(QWidget):
                     self.bot.stop_registration()
                 done_event.wait(0.2)
 
+            self.device_status_signal.emit(device_id, "Idle")
+
             if idx < len(devices) and device_delay > 0 and not self._multi_stop_event.is_set():
-                self.signaler.log_signal.emit(f"Waiting {device_delay}s before next device...")
+                self.log_step(f"Waiting {device_delay}s before next device...")
                 waited = 0
                 while waited < device_delay and not self._multi_stop_event.is_set():
                     threading.Event().wait(0.2)
@@ -612,3 +626,52 @@ class RegAccountPage(QWidget):
         self.multi_run_active = False
         self._multi_stop_event = None
         self.signaler.finished_signal.emit()
+
+    def start_single_device_flow(self, device_id, proxy_arg, device_delay, click_delay):
+        if self.multi_run_active:
+            return
+        self.multi_run_active = True
+        self._multi_stop_event = threading.Event()
+        self.update_start_state()
+
+        thread = threading.Thread(
+            target=self._run_single_device_flow,
+            args=(device_id, proxy_arg, device_delay, click_delay),
+            daemon=True
+        )
+        thread.start()
+
+    def _run_single_device_flow(self, device_id, proxy_arg, device_delay, click_delay):
+        self.current_device_id = device_id
+
+        if self._multi_stop_event.is_set():
+            self.multi_run_active = False
+            self._multi_stop_event = None
+            self.signaler.finished_signal.emit()
+            return
+
+        ok, msg = self.apply_device_config_for_device(device_id)
+        if not ok:
+            self.log_step(f"Error: {msg}")
+            self.multi_run_active = False
+            self._multi_stop_event = None
+            self.signaler.finished_signal.emit()
+            return
+
+        done_event = threading.Event()
+        self.bot = RegistrationBot(self.log_step, done_event.set)
+        self.bot.start_registration(1, proxy_arg, "N/A", device_delay=device_delay, click_delay=click_delay)
+
+        while not done_event.is_set():
+            if self._multi_stop_event.is_set():
+                self.bot.stop_registration()
+            done_event.wait(0.2)
+
+        self.device_status_signal.emit(device_id, "Idle")
+        self.multi_run_active = False
+        self._multi_stop_event = None
+        self.signaler.finished_signal.emit()
+    def log_step(self, message):
+        self.signaler.log_signal.emit(message)
+        if self.current_device_id:
+            self.device_status_signal.emit(self.current_device_id, message)

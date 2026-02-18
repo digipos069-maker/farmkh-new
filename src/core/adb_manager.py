@@ -1,5 +1,7 @@
 
 import subprocess
+import re
+import xml.etree.ElementTree as ET
 
 class ADBManager:
     @staticmethod
@@ -126,3 +128,44 @@ class ADBManager:
     def launch_app(device_id, package_name):
         """Launches the app on the specified device."""
         return ADBManager._run_adb(['-s', device_id, 'shell', 'monkey', '-p', package_name, '-c', 'android.intent.category.LAUNCHER', '1'])
+
+    @staticmethod
+    def dump_ui_xml(device_id):
+        """Dumps UI hierarchy to XML and returns the content."""
+        ok, msg = ADBManager._run_adb(['-s', device_id, 'shell', 'uiautomator', 'dump', '/sdcard/uidump.xml'])
+        if not ok:
+            return False, msg
+        return ADBManager._run_adb(['-s', device_id, 'shell', 'cat', '/sdcard/uidump.xml'])
+
+    @staticmethod
+    def _parse_bounds(bounds_text):
+        m = re.match(r'\\[(\\d+),(\\d+)\\]\\[(\\d+),(\\d+)\\]', bounds_text or '')
+        if not m:
+            return None
+        x1, y1, x2, y2 = map(int, m.groups())
+        return x1, y1, x2, y2
+
+    @staticmethod
+    def find_text_bounds(xml_text, texts):
+        """Finds bounds of the first node whose text matches one of texts."""
+        try:
+            root = ET.fromstring(xml_text)
+        except Exception:
+            return None
+
+        target_set = {t.strip().lower() for t in texts if t}
+        for node in root.iter():
+            text_val = (node.attrib.get('text') or '').strip().lower()
+            if text_val in target_set:
+                bounds = node.attrib.get('bounds')
+                return ADBManager._parse_bounds(bounds)
+        return None
+
+    @staticmethod
+    def click_bounds(device_id, bounds):
+        if not bounds:
+            return False, "Invalid bounds"
+        x1, y1, x2, y2 = bounds
+        x = int((x1 + x2) / 2)
+        y = int((y1 + y2) / 2)
+        return ADBManager._run_adb(['-s', device_id, 'shell', 'input', 'tap', str(x), str(y)])

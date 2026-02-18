@@ -10,13 +10,15 @@ class DeviceManager(QWidget):
     device_selected = pyqtSignal(object)
     config_changed = pyqtSignal(object)
     refresh_requested = pyqtSignal()
+    devices_loaded = pyqtSignal(object)
     def __init__(self):
         super().__init__()
         self.setFixedWidth(320) # Slightly wider for table
         self.apk_folder = "config/apk"
         self._scan_thread = None
         self.init_ui()
-        self.refresh_requested.connect(self.refresh_devices)
+        self.refresh_requested.connect(self.refresh_devices_async)
+        self.devices_loaded.connect(self._apply_device_list)
         self.scan_and_refresh_async() # Initial load
 
     def toggle_delay_inputs(self, button):
@@ -163,6 +165,7 @@ class DeviceManager(QWidget):
         
         layout.addWidget(self.table)
         self.table.itemSelectionChanged.connect(self.on_selection_changed)
+        self.table.itemClicked.connect(self.on_item_clicked)
         
         # Action Buttons
         btn_layout = QHBoxLayout()
@@ -178,7 +181,7 @@ class DeviceManager(QWidget):
             }
             QPushButton:hover { background-color: #e0e0e0; }
         """)
-        refresh_btn.clicked.connect(self.refresh_devices)
+        refresh_btn.clicked.connect(self.refresh_devices_async)
         
         connect_btn = QPushButton("Connect")
         connect_btn.setCursor(Qt.PointingHandCursor)
@@ -216,6 +219,13 @@ class DeviceManager(QWidget):
         self._scan_thread = threading.Thread(target=worker, daemon=True)
         self._scan_thread.start()
 
+    def refresh_devices_async(self):
+        def worker():
+            devices = ADBManager.get_connected_devices()
+            self.devices_loaded.emit(devices)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def toggle_mgmt_mode(self, button):
         # Index 1 is Re-install
         is_reinstall = (self.mgmt_group.id(button) == 1)
@@ -247,12 +257,12 @@ class DeviceManager(QWidget):
 
     def refresh_devices(self):
         self.table.setRowCount(0) # Clear existing rows
-        devices = ADBManager.get_connected_devices()
-        self.device_selected.emit(None)
-        
+        self.device_selected.emit([])
+
+    def _apply_device_list(self, devices):
+        self.refresh_devices()
         if not devices:
             return
-
         for dev in devices:
             self.add_device(dev['id'], dev['name'], dev['status'])
 
@@ -293,6 +303,16 @@ class DeviceManager(QWidget):
 
         self.device_selected.emit(row_ids)
 
+    def on_item_clicked(self, item):
+        # If multiple rows are selected, collapse to just the clicked row.
+        if self.table.selectedItems() and len(self.table.selectionModel().selectedRows()) > 1:
+            row = item.row()
+            self.table.blockSignals(True)
+            self.table.clearSelection()
+            self.table.selectRow(row)
+            self.table.blockSignals(False)
+            self.on_selection_changed()
+
     def emit_config(self):
         self.config_changed.emit(self.get_current_config())
 
@@ -324,3 +344,17 @@ class DeviceManager(QWidget):
             "delay_type": delay_type,
             "delay_seconds": delay_seconds,
         }
+
+    def set_device_status(self, device_id, status_text):
+        if not device_id:
+            return
+        for row in range(self.table.rowCount()):
+            id_item = self.table.item(row, 0)
+            if id_item and id_item.text() == device_id:
+                status_item = self.table.item(row, 2)
+                if not status_item:
+                    status_item = QTableWidgetItem("")
+                    status_item.setTextAlignment(Qt.AlignCenter)
+                    self.table.setItem(row, 2, status_item)
+                status_item.setText(status_text)
+                break
